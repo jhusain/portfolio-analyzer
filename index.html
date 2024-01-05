@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Portfolio Overview</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+  <script src="https://code.highcharts.com/highcharts.js"></script>
+  <script src="https://code.highcharts.com/modules/treemap.js"></script>
+  <script src="https://code.highcharts.com/modules/exporting.js"></script>
+  <script src="https://code.highcharts.com/modules/drilldown.js"></script>
+
+  <style>
+    body {
+      overflow: hidden;
+      margin: 0;
+      font-size: 12px;
+      font-family: "Helvetica Neue", Helvetica;
+    }
+
+    svg {
+      overflow: hidden;
+    }
+
+    rect {
+      pointer-events: all;
+      cursor: pointer;
+      stroke: #EEEEEE;
+    }
+
+    .chart {
+      display: block;
+      margin: auto;
+    }
+
+    .parent .label {
+      color: #FFFFFF;
+      text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+      -webkit-text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+      -moz-text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+    }
+
+    .labelbody {
+      background: transparent;
+    }
+
+    .label {
+      margin: 2px;
+      white-space: pre;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+      -webkit-text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+      -moz-text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.3);
+    }
+
+    .child .label {
+      white-space: pre-wrap;
+      text-align: center;
+      text-overflow: ellipsis;
+    }
+
+    .cell {
+      font-size: 11px;
+      cursor: pointer
+    }
+
+    #error {
+      font-size: medium;
+      color: red;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>Upload CSV Files</h2>
+  <label for="statementFiles">TD and Royal Bank Files:</label>
+  <input type="file" id="statementFiles" accept=".csv" multiple><br><br>
+  <button onclick="processFiles()">Process Files</button>
+  <hr>
+  <span id='error'></span><br />
+  <span id='generated'></span>
+  <div id="assetsByCategory"></div>
+  <div id="assetsByTaxStatusByCategory"></div>
+  <script>
+
+    window.onload = () => {
+      const lastData = loadData();
+
+      if (lastData) {
+        render(lastData.date, lastData.array);
+      }
+    }
+
+    const taxStatusesByAccountNumber = {
+      '4663': 'pre-tax',
+      'M18T': 'pre-tax',
+      '730J': 'post-tax',
+    };
+
+    async function processPortfolioFile(file) {
+      const extracted = await readFile(file);
+      return Papa.parse(extracted, {header: true});
+    }
+
+    async function processBankFiles(files, startString, endString, bankName) {
+      const dataArray = await Promise.all(files.map(file => readFile(file)));
+      const result = dataArray.flatMap((data, index) => {
+        const extracted = extractText(data, startString, endString);
+        const cash = extractCANCashValue(data, bankName);
+        const usdCANExchangeRate = extractUSDCANExchangeRate(data, bankName);
+        const [accountName, accountNumber] = extractAccountDetails(data, bankName);
+
+        return Papa.
+          parse(extracted, {header: true}).
+          data.
+          concat([{
+            'Description': 'Available cash (converted to CAN)',
+            'Symbol': 'CASHCAN',
+            'Quantity': cash,
+            'Price': 1.0,
+            'Book Cost': cash,
+            'Market Value': cash,
+          }]).
+          map(row => ({
+            'Brokerage': bankName,
+            'Account Name': accountName,
+            'Account Number': accountNumber,
+            'Tax Status': taxStatusesByAccountNumber[accountNumber] ?? 'taxable',
+            'Source': files[index].name,
+            Description: row['Description'] || row['Name'] || null,
+            Symbol: row['Symbol'] || null,
+            Quantity: parseFloatOrNull(row['Quantity']) || 0.0,
+            Price: parseFloatOrNull(row['Price']) ?? parseFloatOrNull(row['Last Price']) ?? 0.0,
+            'Book Value': parseFloatOrNull(row['Book Cost']) ?? parseFloatOrNull(row['Total Book Cost']) ?? 0.0,
+            'Current Value': parseFloatOrNull(row['Market Value']) ?? parseFloatOrNull(row['Total Market Value']) ?? 0.0,
+            Currency: row['Currency'] || 'CAD',
+            'Today Gain/Loss Percent': parsePercentOrNull(row['Change Today %']) ?? parsePercentOrNull(row['Change %']) ?? 0.0,
+            'Interest Rate': parseFloatOrNull(row['Coupon Rate']),
+            'Maturity Date': parseDate(row['Maturity Date']),
+            'Annual Dividend Amount': parseFloatOrNull(row['Annual Dividend Amount $']) ?? 0.0,
+            'Dividend Ex Date': parseDate(row['Dividend Ex Date']),
+            Source: files[index].name,
+          })).
+          filter(row => row.Quantity > 0).
+          map(row => {
+            if (row['Currency'] === "USD") {
+              const cashCANValue = row['Current Value'] * usdCANExchangeRate;
+              return {
+                ...row,
+                'Currency': 'CAN',
+                'Current Value': cashCANValue,
+                'Book Value': cashCANValue,
+              };
+            }
+            return row;
+          }).
+          map(row => {
+            const interestRatePercent = extractCouponRate(row);
+            const interestRate = interestRatePercent != null ? interestRatePercent / 100 : null;
+            const bookValue = row['Book Value'];
+            return categorize({
+              ...row,
+              'Interest Rate': interestRate,
+              'Maturity Date': extractMaturityDate(row),
+              'Total Gain/Loss Percent': calculatePercentageChange(bookValue, row['Current Value']),
+              'Annual Yield': interestRate != null ? interestRate * bookValue : 0.0
+            });
+          });
+      });
+
+      const totalCurrentValue = result.reduce((sum, row) => sum + row['Current Value'] ?? 0.0, 0.0);
+      return result.map(row => ({
+        ...row,
+        'Allocation': row['Current Value'] / totalCurrentValue
+      }));
+    }
+
+    function categorize(row) {
+      let category = "Stock";
+      if (row['Interest Rate'] != null) {
+        category = "Fixed";
+      }
+      else if (row['Symbol'] == "CASHCAN") {
+        category = "Cash";
+      }
+
+      let subcategory;
+      if (category === 'Stock') {
+        if (row['Symbol'].indexOf(".PR.") !== -1) {
+          subcategory = "Preferred";
+        } else if (row['Symbol'].indexOf(".UN") !== -1) {
+          subcategory = "Trust";
+        } else if (row['Description'] != null && /\bETF\b/.test(row['Description'])) {
+          subcategory = "ETF";
+        }
+        else {
+          subcategory = "Common";
+        }
+      }
+
+      return {
+        ...row,
+        'Category': category,
+        'Subcategory': subcategory,
+      };
+    }
+
+    async function processFiles() {
+      try {
+        const files = [...document.getElementById('statementFiles').files];
+
+        const royalBankFiles = files.filter(file => file.name.indexOf("Holdings") === 0);
+        const tdFiles = files.filter(file => file.name.indexOf("Holdings") !== 0 && file.name.indexOf("Portfolio") !== 0);
+        const portfolioFiles = files.filter(file => file.name.indexOf("Portfolio") === 0);
+
+        if ((royalBankFiles.length > 0 || tdFiles.length > 0) && portfolioFiles.length > 0) {
+          throw new Error("You can not visualize a previously-generated portfolio file at the same time and individual account files. Did you upload a file that starts with 'Portfolio' by accident alongside account files by mistake?")
+        }
+        else if (portfolioFiles.length > 1) {
+          throw new Error("You can only visualize one previously-generated portfolio file (starts with 'Portfolio') at a time.");
+        }
+
+        const portfolioFile = portfolioFiles[0];
+        const royalBankProcessedData = await processBankFiles(royalBankFiles, ",Product,", "Important Information", "RBC");
+        const tdProcessedData = await processBankFiles(tdFiles, "Symbol,Market,", null, "TD");
+        const portfolioData = portfolioFile ? [await processPortfolioFile(portfolioFile)] : [];
+
+        const newData = [
+          ...royalBankProcessedData,
+          ...tdProcessedData,
+          ...portfolioData,
+        ];
+
+
+        const generatedDate = new Date();
+        const year = generatedDate.getFullYear();
+        const month = String(generatedDate.getMonth() + 1).padStart(2, '0'); // months are 0-based
+        const day = String(generatedDate.getDate()).padStart(2, '0');
+        const hours = String(generatedDate.getHours()).padStart(2, '0');
+        const minutes = String(generatedDate.getMinutes()).padStart(2, '0');
+
+        const fileName = `Portfolio ${year}-${month}-${day} ${hours}-${minutes}.csv`;
+
+        render(generatedDate, newData);
+
+        if (!portfolioFile) {
+          saveData(generatedDate, newData);
+
+          const csv = Papa.unparse(newData);
+          downloadCSV(csv, fileName);
+        }
+
+      } catch (error) {
+        document.getElementById('error').innerText = 'Error: ' + error.message;
+        console.error('An error occurred:', error);
+      }
+    }
+
+    function extractAccountDetails(data, bankName) {
+      var accountNumber, accountNumber;
+      var searchString;
+      switch (bankName) {
+        case "TD":
+          searchString = "Account,";
+          [accountName, accountNumber] = extractText(data, searchString, /\n|,/gim, false, false).split(" - ");
+          break;
+        case "RBC":
+          searchString = "Account: ";
+          [accountNumber, accountName] = extractText(data, searchString, /\n|,/gim, false, false).split(" - ");
+          break;
+      }
+      return [accountName, accountNumber.slice(-4)];
+    }
+
+    function extractCashTable(data) {
+      return Papa.parse(extractText(data, "Currency,Cash", "\n,Product", true, false).trim(), {header: true}).data;
+    }
+
+    function extractCANCashValue(data, bankName) {
+      var accountNumber, accountNumber;
+      var searchString;
+      switch (bankName) {
+        case "TD":
+          return parseFloatOrNull(extractText(data, "Cash,", /\n|,/gim, false, false));
+          break;
+        case "RBC":
+          const cashTable = extractCashTable(data);
+
+          return cashTable.
+            reduce((total, row) => total + parseFloat(row.Cash) * parseFloat(row['Exchange Rate to CAD']), 0.0);
+          break;
+      }
+      throw new Exception(`Unexpected bank name: ${bankName}`);
+    }
+
+    function extractUSDCANExchangeRate(data, bankName) {
+      var accountNumber, accountNumber;
+      var searchString;
+      switch (bankName) {
+        case "TD":
+          return 1.0;
+        case "RBC":
+          const cashTable = extractCashTable(data);
+          return cashTable.
+            filter(row => row.Currency === "USD").
+            map(row => parseFloat(row['Exchange Rate to CAD']))[0]
+            ?? 1.0;
+      }
+      throw new Exception(`Unexpected bank name: ${bankName}`);
+    }
+
+    async function readFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = (e) => reject(e);
+        reader.readAsText(file);
+      });
+    }
+
+    function extractText(data, startPattern, endPattern, leadingInclusive = true, trailingInclusive = false) {
+      let startIndex = 0;
+      let endIndex = data.length;
+      let startLength = 0;
+      let endLength = 0;
+
+      if (startPattern instanceof RegExp) {
+        const startMatch = data.match(startPattern);
+        if (startMatch) {
+          startIndex = startMatch.index;
+          startLength = startMatch[0].length;
+        }
+      } else if (typeof startPattern === 'string') {
+        startIndex = data.indexOf(startPattern);
+        startLength = startIndex >= 0 ? startPattern.length : 0;
+      }
+
+      if (endPattern instanceof RegExp) {
+        const regex = new RegExp(endPattern, 'g');
+        regex.lastIndex = startIndex + startLength; // Start searching after the start pattern
+        const endMatch = regex.exec(data);
+        if (endMatch) {
+          endIndex = endMatch.index;
+          endLength = endMatch[0].length;
+        }
+      } else if (typeof endPattern === 'string' && endPattern) {
+        const tempEndIndex = data.indexOf(endPattern, startIndex + startLength);
+        if (tempEndIndex >= 0) {
+          endIndex = tempEndIndex;
+          endLength = endPattern.length;
+        }
+      }
+
+      if (!leadingInclusive) {
+        startIndex += startLength;
+      }
+      if (trailingInclusive && endIndex !== -1) {
+        endIndex += endLength;
+      }
+
+      return endIndex > startIndex ? data.substring(startIndex, endIndex) : '';
+    }
+
+    function parseFloatOrNull(str) {
+      const value = str === "" || str == null ? null : parseFloat(str);
+      if (value != null && !isNaN(value)) {
+        return parseFloat(value.toFixed(2));
+      } else {
+        return null;
+      }
+    }
+
+    function parsePercentOrNull(str) {
+      const value = parseFloatOrNull(str);
+      if (value != null) {
+        return value / 100;
+      }
+    }
+
+    function calculatePercentageChange(bookValue, currentValue) {
+      if (bookValue === 0) {
+        return 0;
+      }
+
+      const change = ((currentValue - bookValue) / bookValue) * 100;
+      return parseFloat(change / 100).toFixed(2);
+    }
+
+    function parseDate(dateString) {
+      if (dateString) {
+        const date = new Date(dateString);
+        return isNaN(date.getTime()) ? null : formatDate(date);
+      }
+      return null;
+    }
+
+    function formatDate(date) {
+      const d = new Date(date);
+      let month = '' + (d.getMonth() + 1);
+      let day = '' + d.getDate();
+      const year = d.getFullYear();
+
+      if (month.length < 2)
+        month = '0' + month;
+      if (day.length < 2)
+        day = '0' + day;
+
+      return [year, month, day].join('-');
+    }
+
+    function extractCouponRate(row) {
+      if (row['Interest Rate'] == null && !row['Symbol']) {
+        const match = (row.Description ?? '').match(/(\d+\.\d+)%/);
+        return match ? parseFloat(match[1]) : null;
+      }
+      return row['Interest Rate'] || null;
+    }
+
+    function extractMaturityDate(row) {
+      const maturityDateString = row['Maturity Date'] || null;
+      if (!maturityDateString && !row['Symbol']) {
+        const match = (row.Description ?? '').match(/%(.*)/);
+        return match ? parseCustomDateFormat(match[1]) : null;
+      }
+      return parseStandardDateFormat(maturityDateString);
+    }
+
+    function parseStandardDateFormat(dateString) {
+      if (dateString) {
+        const date = new Date(dateString);
+        return isNaN(date.getTime()) ? null : formatDate(date);
+      }
+      return null;
+    }
+
+    function parseCustomDateFormat(dateString) {
+      if (dateString) {
+        const monthCodes = {
+          'JA': 0, 'FB': 1, 'MR': 2, 'AP': 3, 'MY': 4, 'JN': 5,
+          'JL': 6, 'AG': 7, 'SP': 8, 'OT': 9, 'NV': 10, 'DC': 11
+        };
+        const day = parseInt(dateString.substring(0, dateString.length - 4));
+        const monthCode = dateString.substring(dateString.length - 4, dateString.length - 2);
+        const year = parseInt("20" + dateString.substring(dateString.length - 2));
+        const month = monthCodes[monthCode.toUpperCase()];
+
+        if (!isNaN(day) && month !== undefined && !isNaN(year)) {
+          return new Date(year, month, day);
+        }
+      }
+      return null;
+    }
+
+    function downloadCSV(csv, filename) {
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const link = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      link.setAttribute("href", url);
+      link.setAttribute("download", filename);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function formatAsPercent(value) {
+      if (value != null) {
+        return parseFloat((value * 100).toFixed(2)) + "%";
+      }
+      return value;
+    }
+
+    const DATA_KEY = 'myDataKey';
+
+    function saveData(date, array) {
+      if (date instanceof Date && Array.isArray(array)) {
+        const serializedData = JSON.stringify({date: date.toISOString(), array});
+        localStorage.setItem(DATA_KEY, serializedData);
+      }
+    }
+
+    function loadData() {
+      const serializedData = localStorage.getItem(DATA_KEY);
+      if (serializedData) {
+        const parsedData = JSON.parse(serializedData);
+        parsedData.date = new Date(parsedData.date); // Convert back to Date object
+        return {date: parsedData.date, array: parsedData.array};
+      }
+      return null;
+    }
+
+    function render(date, data) {
+      document.getElementById('generated').innerText = `Generated: ${date}`;
+      renderHighchartsTreemap(data);
+      //renderHighchartsTreemapByTaxStatus(data);
+    }
+
+    function groupBySymbol(data) {
+      const assetsBySymbol =
+        data.reduce(
+          (map, row) => {
+            let key = row['Symbol'] ?? row['Description'];
+            const group = map[key] ?? [];
+            group.push(row)
+            return {...map, [key]: group};
+          },
+          {});
+
+      const result =
+        Object
+          .entries(assetsBySymbol)
+          .map(([key, group]) => {
+            const symbolTotalCurrentValue =
+              group.reduce(
+                (total, row) => total + (row['Current Value'] ?? 0.0),
+                0.0);
+
+            let symbolTotalGainLossPercent = 0.0;
+            let symbolTotalAllocation = 0.0;
+            let symbolTotalInterestRate = null;
+
+            for (const row of group) {
+              symbolTotalGainLossPercent += (((row['Current Value'] ?? 0.0) / symbolTotalCurrentValue) * row['Total Gain/Loss Percent']);
+              symbolTotalInterestRate =
+                row['Interest Rate'] != null ?
+                  symbolTotalInterestRate + (((row['Current Value'] ?? 0.0) / symbolTotalCurrentValue) * row['Interest Rate']) :
+                  null;
+              symbolTotalAllocation += row['Allocation'] ?? 0.0;
+            }
+
+            return {
+              ...group[0],
+              'Current Value': symbolTotalCurrentValue,
+              'Allocation': symbolTotalAllocation,
+              'Total Gain/Loss Percent': symbolTotalGainLossPercent,
+              'Interest Rate': symbolTotalInterestRate,
+            }
+          });
+
+      return result;
+    }
+    function renderHighchartsTreemap(data) {
+      function getColorByGainLossPercent(gainLossPercent) {
+        // Define the range for gainLossPercent for color calculation
+        const maxPercent = 0.25; // Adjust this as needed
+        const minPercent = -0.25; // Adjust this as needed
+
+        let color;
+        if (gainLossPercent < -0.005) {
+          const lossPercent = Math.abs(gainLossPercent)
+          // Increase red color intensity for more negative values
+          let intensity = Math.max(0.1, Math.min(0.9, (lossPercent - 0.005) / (maxPercent - 0.005)));
+          color = Highcharts.color(`rgba(255, ${255 * (1 - intensity)}, ${255 * (1 - intensity)}, 1)`).get();
+        } else if (gainLossPercent > 0.005) {
+          // Increase green color intensity for more positive values
+          let intensity = Math.max(0.1, Math.min(0.9, (gainLossPercent - 0.005) / (maxPercent - 0.005)));
+          color = Highcharts.color(`rgba(${255 * (1 - intensity)}, 255, ${255 * (1 - intensity)}, 1)`).get();
+        } else {
+          // Gray for values close to zero
+          color = 'gray';
+        }
+
+        return color;
+      }
+
+      // Aggregate assets across accounts by symbol
+      data = groupBySymbol(data);
+
+      // Transform data to fit Highcharts structure
+      const highchartsData = [];
+      const highchartsDataById = {};
+      let id = 0;
+      data.forEach(item => {
+        const accountNumber = item['Tax Status'];
+        const category = item['Category'];
+        const subcategory = item['Subcategory'];
+        const currentValue = item['Current Value'];
+        const totalGainLossPercent = parseFloatOrNull(item['Total Gain/Loss Percent']) ?? 0.0;
+        const text = item['Symbol'] ?? item['Description'];
+
+        const categoryNodeId = 'category-' + category;
+        const subcategoryNodeId = 'subcategory-' + subcategory;
+        const parentId = subcategory ? subcategoryNodeId : categoryNodeId;
+        const nodeId = 'node' + (id++);
+
+        // Add category node if not already added
+        if (!highchartsData.find(node => node.id === categoryNodeId)) {
+          highchartsData.push({
+            id: categoryNodeId,
+            name: category,
+          });
+        }
+
+        // Add subcategory node if not already added
+        if (!highchartsData.find(node => node.id === subcategoryNodeId)) {
+          highchartsData.push({
+            id: subcategoryNodeId,
+            parent: categoryNodeId,
+            name: subcategory,
+          });
+        }
+        // Add subcategory/leaf node
+        highchartsData.push({
+          id: nodeId,
+          parent: parentId,
+          name: text,
+          value: currentValue,
+          color: getColorByGainLossPercent(totalGainLossPercent),
+        });
+
+        highchartsDataById[nodeId] = item;
+      });
+
+      // Create the Highcharts treemap
+      Highcharts.chart('assetsByCategory', {
+        series: [{
+          type: 'treemap',
+          layoutAlgorithm: 'squarified',
+          data: highchartsData,
+          levels: [
+            {
+              level: 1,
+              layoutAlgorithm: 'sliceAndDice',
+              dataLabels: {
+                enabled: true,
+                align: 'left',
+                verticalAlign: 'top',
+                style: {
+                  fontSize: '19px',
+                  fontWeight: 'bold'
+                }
+              }
+            },
+            {
+              level: 2,
+              dataLabels: {
+                enabled: true,
+                align: 'left',
+                verticalAlign: 'top',
+                style: {
+                  fontSize: '17px',
+                  fontWeight: 'bold'
+                }
+              }
+            },
+          ]
+        }],
+        title: {
+          text: 'Portfolio by Asset Category'
+        },
+        tooltip: {
+          formatter: function () {
+            const node = highchartsDataById[this.point.id];
+            let tooltip = [`Symbol: ${this.point.name}`,
+
+            '<br>Current Value: $' + Highcharts.numberFormat(this.point.value, 2, ','),
+            ].join('');
+            if (node) {
+              tooltip +=
+                `<br>Description: ${node['Description']}
+<br>Allocation Percentage:  ${formatAsPercent(node['Allocation'])}
+<br>Total Gain/Loss Percent: ${formatAsPercent(node['Total Gain/Loss Percent'])}
+<br>Interest Rate: ${formatAsPercent(node['Interest Rate']) || 'N/A'}`;
+            }
+            return tooltip;
+
+          }
+        }
+      });
+    }
+
+    function renderHighchartsTreemapByTaxStatus(data) {
+      function getColorByGainLossPercent(gainLossPercent) {
+        // Define the range for gainLossPercent for color calculation
+        const maxPercent = 0.25; // Adjust this as needed
+        const minPercent = -0.25; // Adjust this as needed
+
+        let color;
+        if (gainLossPercent < -0.005) {
+          const lossPercent = Math.abs(gainLossPercent)
+          // Increase red color intensity for more negative values
+          let intensity = Math.max(0.1, Math.min(0.9, (lossPercent - 0.005) / (maxPercent - 0.005)));
+          color = Highcharts.color(`rgba(255, ${255 * (1 - intensity)}, ${255 * (1 - intensity)}, 1)`).get();
+        } else if (gainLossPercent > 0.005) {
+          // Increase green color intensity for more positive values
+          let intensity = Math.max(0.1, Math.min(0.9, (gainLossPercent - 0.005) / (maxPercent - 0.005)));
+          color = Highcharts.color(`rgba(${255 * (1 - intensity)}, 255, ${255 * (1 - intensity)}, 1)`).get();
+        } else {
+          // Gray for values close to zero
+          color = 'gray';
+        }
+
+        return color;
+      }
+
+
+      // Transform data to fit Highcharts structure
+      const highchartsData = [];
+      const highchartsDataById = {};
+      let id = 0;
+      data.forEach(item => {
+        const accountNumber = item['Tax Status'];
+        const category = item['Category'];
+        const subcategory = item['Subcategory'];
+        const currentValue = item['Current Value'];
+        const totalGainLossPercent = parseFloatOrNull(item['Total Gain/Loss Percent']) ?? 0.0;
+        const text = item['Symbol'] ?? item['Description'];
+
+        const accountNodeId = 'account-' + accountNumber;
+        const categoryNodeId = 'category-' + category;
+        const subcategoryNodeId = 'subcategory-' + subcategory;
+        let parentId =
+          [
+            [subcategory, subcategoryNodeId],
+            [category, categoryNodeId],
+            [accountNumber, accountNodeId]
+          ].find(([key, id]) => key != null)[1];
+
+        const nodeId = 'node' + (id++);
+
+        // Add account number node if not already added
+        if (!highchartsData.find(node => node.id === accountNodeId)) {
+          highchartsData.push({
+            id: accountNodeId,
+            name: accountNumber,
+          });
+        }
+
+        // Add category node if not already added
+        if (!highchartsData.find(node => node.id === categoryNodeId)) {
+          highchartsData.push({
+            id: categoryNodeId,
+            parent: accountNodeId,
+            name: category,
+          });
+        }
+
+        // Add subcategory node if not already added
+        if (!highchartsData.find(node => node.id === subcategoryNodeId)) {
+          highchartsData.push({
+            id: subcategoryNodeId,
+            parent: categoryNodeId,
+            name: subcategory,
+          });
+        }
+        // Add subcategory/leaf node
+        highchartsData.push({
+          id: nodeId,
+          parent: parentId,
+          name: text,
+          value: currentValue,
+          color: getColorByGainLossPercent(totalGainLossPercent),
+        });
+
+        highchartsDataById[nodeId] = item;
+      });
+
+      // Create the Highcharts treemap
+      Highcharts.chart('assetsByTaxStatusByCategory', {
+        series: [{
+          type: 'treemap',
+          layoutAlgorithm: 'squarified',
+          data: highchartsData,
+          levels: [
+            {
+              level: 1,
+              layoutAlgorithm: 'sliceAndDice',
+              dataLabels: {
+                enabled: true,
+                align: 'left',
+                verticalAlign: 'top',
+                style: {
+                  fontSize: '20px',
+                  fontWeight: 'bold'
+                }
+              }
+            },
+            {
+              level: 2,
+              dataLabels: {
+                enabled: true,
+                align: 'left',
+                verticalAlign: 'top',
+                style: {
+                  fontSize: '17px',
+                  fontWeight: 'bold'
+                }
+              }
+            },
+            {
+              level: 3,
+              dataLabels: {
+                enabled: true,
+                align: 'left',
+                verticalAlign: 'top',
+                style: {
+                  fontSize: '15px',
+                  fontWeight: 'lighter'
+                }
+              }
+            }
+          ]
+        }],
+        title: {
+          text: 'Portfolio by Tax Status and Asset Category'
+        },
+        tooltip: {
+          formatter: function () {
+            const node = highchartsDataById[this.point.id];
+            let tooltip = [`Symbol: ${this.point.name}`,
+
+            '<br>Current Value: $' + Highcharts.numberFormat(this.point.value, 2, ','),
+            ].join('');
+            if (node) {
+              tooltip +=
+                `<br>Description: ${node['Description']}
+    <br>Allocation Percentage:  ${formatAsPercent(node['Allocation'])}
+    <br>Total Gain/Loss Percent: ${formatAsPercent(node['Total Gain/Loss Percent'])}
+    <br>Today Gain/Loss Percent: ${formatAsPercent(node['Today Gain/Loss Percent'])}
+    <br>Interest Rate: ${formatAsPercent(node['Interest Rate']) || 'N/A'}`;
+            }
+            return tooltip;
+
+          }
+        }
+      });
+    }
+
+
+  </script>
+</body>
+
+</html>
