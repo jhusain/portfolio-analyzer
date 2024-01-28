@@ -99,6 +99,24 @@
       '730J': 'post-tax',
     };
 
+    // Function to get a numeric query string parameter
+    function getQueryParamAsJSON(paramName) {
+      // Get the URL of the current page
+      const url = window.location.href;
+
+      // Create a URLSearchParams object from the URL
+      const urlParams = new URLSearchParams(new URL(url).search);
+
+      // Get the parameter value as a string
+      const paramValue = urlParams.get(paramName);
+
+      if (paramValue) {
+        return JSON.parse(paramValue)
+      } else {
+        return null;
+      }
+    }
+
     async function processPortfolioFile(file) {
       const extracted = await readFile(file);
       return Papa.parse(extracted, {header: true});
@@ -155,30 +173,21 @@
               };
             }
             return row;
-          }).
-          map(row => {
-            const interestRatePercent = extractCouponRate(row);
-            const interestRate = interestRatePercent != null ? interestRatePercent / 100 : null;
-            const bookValue = row['Book Value'];
-            return categorize({
-              ...row,
-              'Interest Rate': interestRate,
-              'Maturity Date': extractMaturityDate(row),
-              'Total Gain/Loss Percent': calculatePercentageChange(bookValue, row['Current Value']),
-              'Annual Yield': interestRate != null ? interestRate * bookValue : 0.0
-            });
           });
       });
 
-      const totalCurrentValue = result.reduce((sum, row) => sum + row['Current Value'] ?? 0.0, 0.0);
-      return result.map(row => ({
-        ...row,
-        'Allocation': row['Current Value'] / totalCurrentValue
-      }));
+      return result;
     }
 
     function categorize(row) {
       let category = "Stock";
+      if (row['Symbol'] === "ANNUITY") {
+        return {
+          ...row,
+          Category: "Fixed",
+          Subcategory: "Annuity"
+        }
+      }
       if (row['Interest Rate'] != null) {
         category = "Fixed";
       }
@@ -227,12 +236,36 @@
         const tdProcessedData = await processBankFiles(tdFiles, "Symbol,Market,", null, "TD");
         const portfolioData = portfolioFile ? [await processPortfolioFile(portfolioFile)] : [];
 
+        const preprocessedBankDataBeforeAnnuity = [...royalBankProcessedData, ...tdProcessedData];
+
+        const annuityRow = getQueryParamAsJSON("annuity");
+        const preprocessedBankData = [
+          ...preprocessedBankDataBeforeAnnuity,
+          ...((preprocessedBankDataBeforeAnnuity.length > 0 || annuityRow) ?
+            [annuityRow] : [])
+        ].map(row => {
+          const interestRatePercent = extractCouponRate(row);
+          const interestRate = interestRatePercent != null ? interestRatePercent / 100 : null;
+          const bookValue = row['Book Value'];
+          return categorize({
+            ...row,
+            'Interest Rate': interestRate,
+            'Maturity Date': extractMaturityDate(row),
+            'Total Gain/Loss Percent': calculatePercentageChange(bookValue, row['Current Value']),
+            'Annual Yield': interestRate != null ? interestRate * bookValue : 0.0
+          });
+        });
+
+        const totalCurrentValue = preprocessedBankData.reduce((sum, row) => sum + row['Current Value'] ?? 0.0, 0.0);
+        const processedBankData = preprocessedBankData.map(row => ({
+          ...row,
+          'Allocation': row['Current Value'] / totalCurrentValue
+        }));
+
         const newData = [
-          ...royalBankProcessedData,
-          ...tdProcessedData,
+          ...processedBankData,
           ...portfolioData,
         ];
-
 
         const generatedDate = new Date();
         const year = generatedDate.getFullYear();
