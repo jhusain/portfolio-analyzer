@@ -189,8 +189,19 @@
           Subcategory: "Annuity"
         }
       }
-      if (row['Interest Rate'] != null || fixedEtfs.includes(row['Symbol'])) {
-        category = "Fixed";
+      else if (row['Interest Rate'] != null) {
+        return {
+          ...row,
+          Category: "Fixed",
+          Subcategory: "Individual"
+        }
+      }
+      else if (fixedEtfs.includes(row['Symbol'])) {
+        return {
+          ...row,
+          Category: "Fixed",
+          Subcategory: "ETF"
+        }
       }
       else if (row['Symbol'] == "CASHCAN") {
         category = "Cash";
