@@ -203,7 +203,7 @@
           Subcategory: "ETFs"
         }
       }
-      else if (row['Symbol'] == "CASHCAN") {
+      else if (row['Symbol'] == "CASHCAN" || /(RBF|TDB)[0-9]+/gi.exec(row['Symbol']) != null) {
         category = "Cash";
       }
 
