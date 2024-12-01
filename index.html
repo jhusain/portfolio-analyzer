@@ -164,8 +164,8 @@
           filter(row => row.Quantity > 0).
           map(row => {
             if (row['Currency'] === "USD") {
-              if (windowusdCANExchangeRate == null) {
-                throw "Failed to find USD to CAN Exchange rate";
+              if (window.usdCANExchangeRate == null) {
+                throw new Error("Failed to find USD to CAN Exchange rate");
               }
 
               const cashCANValue = row['Current Value'] * window.usdCANExchangeRate;
@@ -330,13 +330,13 @@
     function extractCANCashValue(data, bankName) {
       var accountNumber, accountNumber;
       var searchString;
+      
       switch (bankName) {
         case "RBC":
           const cashTable = extractCashTable(data);
 
           return cashTable.
             reduce((total, row) => total + parseFloat(row.Cash) * parseFloat(row['Exchange Rate to CAD']), 0.0);
-          break;
         default:
           return null;
       }
