@@ -127,7 +127,7 @@
       const result = dataArray.flatMap((data, index) => {
         const extracted = extractText(data, startString, endString);
         const cash = extractCANCashValue(data, bankName);
-        const usdCANExchangeRate = extractUSDCANExchangeRate(data, bankName);
+        window.usdCANExchangeRate = window.usdCANExchangeRate || extractUSDCANExchangeRate(data, bankName);
         const [accountName, accountNumber] = extractAccountDetails(data, bankName);
 
         return Papa.
@@ -164,7 +164,11 @@
           filter(row => row.Quantity > 0).
           map(row => {
             if (row['Currency'] === "USD") {
-              const cashCANValue = row['Current Value'] * usdCANExchangeRate;
+              if (windowusdCANExchangeRate == null) {
+                throw "Failed to find USD to CAN Exchange rate";
+              }
+
+              const cashCANValue = row['Current Value'] * window.usdCANExchangeRate;
               return {
                 ...row,
                 'Currency': 'CAN',
@@ -327,17 +331,15 @@
       var accountNumber, accountNumber;
       var searchString;
       switch (bankName) {
-        case "TD":
-          return parseFloatOrNull(extractText(data, "Cash,", /\n|,/gim, false, false));
-          break;
         case "RBC":
           const cashTable = extractCashTable(data);
 
           return cashTable.
             reduce((total, row) => total + parseFloat(row.Cash) * parseFloat(row['Exchange Rate to CAD']), 0.0);
           break;
+        default:
+          return null;
       }
-      throw new Exception(`Unexpected bank name: ${bankName}`);
     }
 
     function extractUSDCANExchangeRate(data, bankName) {
