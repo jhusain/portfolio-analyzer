@@ -153,7 +153,7 @@
             Price: parseFloatOrNull(row['Price']) ?? parseFloatOrNull(row['Last Price']) ?? 0.0,
             'Book Value': parseFloatOrNull(row['Book Cost']) ?? parseFloatOrNull(row['Total Book Cost']) ?? 0.0,
             'Current Value': parseFloatOrNull(row['Market Value']) ?? parseFloatOrNull(row['Total Market Value']) ?? 0.0,
-            Currency: row['Currency'] || 'CAD',
+            Currency: row['Market'] === "US" ? "USD" : (row['Currency'] || 'CAD'),
             'Today Gain/Loss Percent': parsePercentOrNull(row['Change Today %']) ?? parsePercentOrNull(row['Change %']) ?? 0.0,
             'Interest Rate': parseFloatOrNull(row['Coupon Rate']),
             'Maturity Date': parseDate(row['Maturity Date']),
