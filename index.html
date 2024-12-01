@@ -330,24 +330,24 @@
     function extractCANCashValue(data, bankName) {
       var accountNumber, accountNumber;
       var searchString;
-      
       switch (bankName) {
+        case "TD":
+          return parseFloatOrNull(extractText(data, "Cash,", /\n|,/gim, false, false));
+          break;
         case "RBC":
           const cashTable = extractCashTable(data);
 
           return cashTable.
             reduce((total, row) => total + parseFloat(row.Cash) * parseFloat(row['Exchange Rate to CAD']), 0.0);
-        default:
-          return null;
+          break;
       }
+      throw new Exception(`Unexpected bank name: ${bankName}`);
     }
 
     function extractUSDCANExchangeRate(data, bankName) {
       var accountNumber, accountNumber;
       var searchString;
       switch (bankName) {
-        case "TD":
-          return 1.0;
         case "RBC":
           const cashTable = extractCashTable(data);
           return cashTable.
@@ -355,7 +355,7 @@
             map(row => parseFloat(row['Exchange Rate to CAD']))[0]
             ?? 1.0;
       }
-      throw new Exception(`Unexpected bank name: ${bankName}`);
+      return null;
     }
 
     async function readFile(file) {
