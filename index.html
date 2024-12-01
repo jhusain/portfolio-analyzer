@@ -126,13 +126,20 @@
       const dataArray = await Promise.all(files.map(file => readFile(file)));
       const result = dataArray.flatMap((data, index) => {
         const extracted = extractText(data, startString, endString);
-        const cash = extractCANCashValue(data, bankName);
         window.usdCANExchangeRate = window.usdCANExchangeRate || extractUSDCANExchangeRate(data, bankName);
+
         const [accountName, accountNumber] = extractAccountDetails(data, bankName);
 
-        return Papa.
+        const rows = Papa.
           parse(extracted, {header: true}).
-          data.
+          data;
+
+        // The only way of knowing a TD account is in USD currency is to look for at least
+        // one security with Market=US. Then we also know cash is in USD.
+        const defaultAccountCurrency = rows.some(row => row.Market == "US") ? "USD" : "CAN";
+        const cash = extractCANCashValue(data, bankName, defaultAccountCurrency);
+        
+        return rows.
           concat([{
             'Description': 'Available cash (converted to CAN)',
             'Symbol': 'CASHCAN',
@@ -153,7 +160,7 @@
             Price: parseFloatOrNull(row['Price']) ?? parseFloatOrNull(row['Last Price']) ?? 0.0,
             'Book Value': parseFloatOrNull(row['Book Cost']) ?? parseFloatOrNull(row['Total Book Cost']) ?? 0.0,
             'Current Value': parseFloatOrNull(row['Market Value']) ?? parseFloatOrNull(row['Total Market Value']) ?? 0.0,
-            Currency: row['Market'] === "US" ? "USD" : (row['Currency'] || 'CAD'),
+            Currency: row['Currency'] || defaultAccountCurrency,
             'Today Gain/Loss Percent': parsePercentOrNull(row['Change Today %']) ?? parsePercentOrNull(row['Change %']) ?? 0.0,
             'Interest Rate': parseFloatOrNull(row['Coupon Rate']),
             'Maturity Date': parseDate(row['Maturity Date']),
@@ -327,12 +334,17 @@
       return Papa.parse(extractText(data, "Currency,Cash", "\n,Product", true, false).trim(), {header: true}).data;
     }
 
-    function extractCANCashValue(data, bankName) {
-      var accountNumber, accountNumber;
-      var searchString;
+    function extractCANCashValue(data, bankName, defaultTDCurrency) {
       switch (bankName) {
         case "TD":
-          return parseFloatOrNull(extractText(data, "Cash,", /\n|,/gim, false, false));
+          const cash = parseFloatOrNull(extractText(data, "Cash,", /\n|,/gim, false, false));
+          if (defaultTDCurrency === "USD") {
+            if (window.usdCANExchangeRate == null) {
+              throw new Error("Failed to retrieve USD/CAN Exchange rate.");
+            }
+            return cash * window.usdCANExchangeRate;
+          }
+          return cash;
           break;
         case "RBC":
           const cashTable = extractCashTable(data);
